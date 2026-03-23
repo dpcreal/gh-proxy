@@ -32,17 +32,38 @@ black_list = '''
 pass_list = '''
 '''
 
-HOST = '127.0.0.1'  # 监听地址，建议监听本地然后由web服务器反代
-PORT = 80  # 监听端口
+HOST = '0.0.0.0'  # Codespaces-friendly
+PORT = 8080       # Codespaces-friendly
 ASSET_URL = 'https://hunshcn.github.io/gh-proxy'  # 主页
 
 white_list = [tuple([x.replace(' ', '') for x in i.split('/')]) for i in white_list.split('\n') if i]
 black_list = [tuple([x.replace(' ', '') for x in i.split('/')]) for i in black_list.split('\n') if i]
 pass_list = [tuple([x.replace(' ', '') for x in i.split('/')]) for i in pass_list.split('\n') if i]
+
 app = Flask(__name__)
 CHUNK_SIZE = 1024 * 10
-index_html = requests.get(ASSET_URL, timeout=10).text
-icon_r = requests.get(ASSET_URL + '/favicon.ico', timeout=10).content
+
+# Safer startup in Codespaces: don't crash if the asset site is unreachable
+try:
+    index_html = requests.get(ASSET_URL, timeout=10).text
+except Exception:
+    index_html = """
+    <!doctype html>
+    <html>
+      <head><meta charset="utf-8"><title>gh-proxy</title></head>
+      <body>
+        <h2>gh-proxy is running</h2>
+        <p>Example:</p>
+        <code>/https://github.com/OWNER/REPO/archive/refs/heads/main.zip</code>
+      </body>
+    </html>
+    """
+
+try:
+    icon_r = requests.get(ASSET_URL + '/favicon.ico', timeout=10).content
+except Exception:
+    icon_r = b''
+
 exp1 = re.compile(r'^(?:https?://)?github\.com/(?P<author>.+?)/(?P<repo>.+?)/(?:releases|archive)/.*$')
 exp2 = re.compile(r'^(?:https?://)?github\.com/(?P<author>.+?)/(?P<repo>.+?)/(?:blob|raw)/.*$')
 exp3 = re.compile(r'^(?:https?://)?github\.com/(?P<author>.+?)/(?P<repo>.+?)/(?:info|git-).*$')
@@ -93,11 +114,9 @@ def iter_content(self, chunk_size=1, decode_unicode=False):
         raise StreamConsumedError()
     elif chunk_size is not None and not isinstance(chunk_size, int):
         raise TypeError("chunk_size must be an int, it is instead a %s." % type(chunk_size))
-    # simulate reading small chunks of the content
+
     reused_chunks = iter_slices(self._content, chunk_size)
-
     stream_chunks = generate()
-
     chunks = reused_chunks if self._content_consumed else stream_chunks
 
     if decode_unicode:
@@ -121,19 +140,22 @@ def handler(u):
         u = u.replace('s:/', 's://', 1)  # uwsgi会将//传递为/
     pass_by = False
     m = check_url(u)
+
     if m:
         m = tuple(m.groups())
         if white_list:
             for i in white_list:
-                if m[:len(i)] == i or i[0] == '*' and len(m) == 2 and m[1] == i[1]:
+                if m[:len(i)] == i or (i[0] == '*' and len(m) == 2 and m[1] == i[1]):
                     break
             else:
                 return Response('Forbidden by white list.', status=403)
+
         for i in black_list:
-            if m[:len(i)] == i or i[0] == '*' and len(m) == 2 and m[1] == i[1]:
+            if m[:len(i)] == i or (i[0] == '*' and len(m) == 2 and m[1] == i[1]):
                 return Response('Forbidden by black list.', status=403)
+
         for i in pass_list:
-            if m[:len(i)] == i or i[0] == '*' and len(m) == 2 and m[1] == i[1]:
+            if m[:len(i)] == i or (i[0] == '*' and len(m) == 2 and m[1] == i[1]):
                 pass_by = True
                 break
     else:
@@ -164,11 +186,20 @@ def proxy(u, allow_redirects=False):
     r_headers = dict(request.headers)
     if 'Host' in r_headers:
         r_headers.pop('Host')
+
     try:
         url = u + request.url.replace(request.base_url, '', 1)
         if url.startswith('https:/') and not url.startswith('https://'):
             url = 'https://' + url[7:]
-        r = requests.request(method=request.method, url=url, data=request.data, headers=r_headers, stream=True, allow_redirects=allow_redirects)
+
+        r = requests.request(
+            method=request.method,
+            url=url,
+            data=request.data,
+            headers=r_headers,
+            stream=True,
+            allow_redirects=allow_redirects
+        )
         headers = dict(r.headers)
 
         if 'Content-length' in r.headers and int(r.headers['Content-length']) > size_limit:
@@ -190,6 +221,8 @@ def proxy(u, allow_redirects=False):
         headers['content-type'] = 'text/html; charset=UTF-8'
         return Response('server error ' + str(e), status=500, headers=headers)
 
+
 app.debug = True
+
 if __name__ == '__main__':
     app.run(host=HOST, port=PORT)
